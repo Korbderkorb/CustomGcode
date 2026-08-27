@@ -1,0 +1,37 @@
+# --- Local test scaffolding -------------------------------------------------
+# jsdom, needed only to run web/ui_test.js. Reinstall with: npm install jsdom
+node_modules/
+package.json
+package-lock.json
+
+# Real sliced files used by web/ui_test.js and web/equivalence_test.py.
+# Megabytes of somebody's print job, and machine-specific; the README says
+# what to put here.
+testdata/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.pyc
+
+# --- GCode ------------------------------------------------------------------
+# Nothing in this repo should be gcode: inputs are somebody's print job and
+# outputs are generated. A Bambu merge writes '<custom>.gcode.3mf', which is
+# indistinguishable by name from a reference, so the whole family is ignored.
+*.gcode
+*.gcode.3mf
+*_merge_report.txt
+*.stl
+
+# --- Grasshopper / Rhino local state ----------------------------------------
+# Grasshopper writes these next to a definition while it is open.
+*.gh.bak
+*.ghx.bak
+*.3dm.bak
+*.rhl
+backup/
+
+# --- Local editor and tool state --------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

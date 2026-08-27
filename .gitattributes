@@ -1,0 +1,15 @@
+# Everything text is LF in the repo, whatever the checkout platform does.
+# The generated page is byte-compared against the build output, so a checkout
+# that rewrote its line endings would look like a stale build.
+* text=auto eol=lf
+
+# Grasshopper definitions are binary containers. Without this git would try to
+# diff and merge them as text, which corrupts them.
+*.gh   binary
+*.ghx  binary
+*.3dm  binary
+
+# GCode is gitignored, but mark it anyway in case a file is ever force-added.
+*.gcode      text eol=lf
+*.gcode.3mf  binary
+*.stl        binary

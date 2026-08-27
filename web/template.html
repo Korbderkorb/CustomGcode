@@ -1,0 +1,1776 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GCode Merger</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #fbfbfd;
+    --text: #16181d;
+    --muted: #676d7a;
+    --border: #dfe2e8;
+    --accent: #2f6df6;
+    --accent-soft: #e8f0ff;
+    --ok: #17803d;
+    --warn: #a35b00;
+    --warn-soft: #fff4e2;
+    --err: #c02626;
+    --err-soft: #fdecec;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --panel: #1c1f25;
+      --panel-2: #22262d;
+      --text: #e8eaee;
+      --muted: #9aa1ae;
+      --border: #333844;
+      --accent: #6f9bff;
+      --accent-soft: #1e2a44;
+      --ok: #55c47f;
+      --warn: #e0a250;
+      --warn-soft: #362a17;
+      --err: #f08a8a;
+      --err-soft: #3a1f1f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 20px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  header { margin-bottom: 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .drops { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .drops { grid-template-columns: 1fr; } }
+  .drop {
+    border: 1.5px dashed var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+    padding: 22px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+    min-height: 132px;
+    display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  }
+  .drop:hover, .drop.hover { border-color: var(--accent); background: var(--accent-soft); }
+  .drop.filled { border-style: solid; border-color: var(--ok); }
+  .drop .label { font-weight: 600; font-size: 14px; }
+  .drop .hint { color: var(--muted); font-size: 12.5px; }
+  .drop .file { font-family: var(--mono); font-size: 12.5px; color: var(--ok); word-break: break-all; }
+  .row { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label.fl { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+  select, input[type="number"], input[type="text"] {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px 11px; font-size: 14px; min-width: 280px;
+    font-family: inherit;
+  }
+  input[type="checkbox"] {
+    width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);
+  }
+  .row.wrapline { align-items: flex-end; margin-bottom: 12px; }
+  .row.wrapline:last-of-type { margin-bottom: 0; }
+  .field.grow { flex: 1 1 260px; }
+  .field.grow select, .field.grow input { min-width: 0; width: 100%; }
+  .field.narrow input { min-width: 0; width: 110px; }
+  .field.needed input { border-color: var(--warn); }
+
+  /* The detected-printer line is the one thing on this card that has to be
+     read before pressing Process, so it gets the emphasis and the state
+     colour: green when the machine is known, amber when it is not. */
+  .detected {
+    font-size: 13.5px; font-weight: 600; margin-bottom: 14px;
+    padding: 10px 12px; border-radius: 7px;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .detected.known { border-color: var(--ok); }
+  .detected.unknown { border-color: var(--warn); }
+  .detected .small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .srcnote { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.6; }
+  button {
+    background: var(--accent); color: #fff; border: 0;
+    border-radius: 7px; padding: 10px 20px;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-width: 132px;
+    transition: background-color .2s ease;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); min-width: 0; }
+  button.busy { opacity: 1; cursor: progress; }
+  button.done { background: var(--ok); opacity: 1; }
+
+  /* IMPORTANT: the merge runs synchronously on the main thread (Pyodide), so
+     the UI is blocked while it works. Only transform/opacity animations are
+     handed to the compositor and keep running through that block -- animating
+     anything else here (width, background, border-color) would visibly freeze. */
+  .spinner {
+    width: 14px; height: 14px; flex: none;
+    border: 2px solid rgba(255, 255, 255, .35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    will-change: transform;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .bar {
+    height: 3px; border-radius: 2px; margin-top: 14px;
+    background: var(--border); overflow: hidden; position: relative;
+  }
+  .bar::after {
+    content: ""; position: absolute; inset: 0;
+    background: var(--accent); border-radius: 2px;
+    transform: translateX(-100%);
+    animation: slide 1.1s ease-in-out infinite;
+    will-change: transform;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    50%  { transform: translateX(0%); }
+    100% { transform: translateX(100%); }
+  }
+  .status { font-size: 13px; color: var(--muted); margin-top: 12px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.loading { background: var(--warn); animation: pulse 1.1s infinite; }
+  .dot.ready { background: var(--ok); }
+  .dot.error { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+  pre.log {
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; max-height: 420px; overflow: auto; white-space: pre-wrap;
+    word-break: break-word; margin: 0;
+  }
+  .log .err { color: var(--err); }
+  .log .warn { color: var(--warn); }
+  .banner {
+    border-radius: 8px; padding: 11px 13px; font-size: 13.5px; margin-bottom: 12px;
+    display: flex; align-items: flex-start; gap: 9px;
+    animation: rise .3s cubic-bezier(.2, .8, .3, 1) both;
+  }
+  .banner.warn { background: var(--warn-soft); color: var(--warn); }
+  .banner.err { background: var(--err-soft); color: var(--err); }
+  .banner.ok { background: var(--accent-soft); color: var(--ok); }
+  .banner .mark { font-weight: 700; flex: none; line-height: 1.4; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .stats {
+    display: grid; gap: 10px; margin-bottom: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+  .stat {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 12px 13px;
+    animation: rise .3s cubic-bezier(.2, .8, .3, 1) both;
+  }
+  .stat.primary { border-color: var(--accent); background: var(--accent-soft); }
+  .stat .k {
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .stat .v { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; margin-top: 4px; }
+  .stat .v .u { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+  .stat .d { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .estnote { font-size: 12px; color: var(--muted); margin: -4px 0 14px; }
+  .hidden { display: none; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .dl { display: flex; gap: 10px; flex-wrap: wrap; }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>GCode Merger</h1>
+    <div class="sub">Merges a Grasshopper path with a sliced reference &mdash; a BambuStudio <code>.gcode.3mf</code> or a Marlin-flavour <code>.gcode</code> from Cura / PrusaSlicer / Orca. Runs entirely in your browser &mdash; no files are uploaded anywhere.</div>
+  </header>
+
+  <div class="card">
+    <div class="drops">
+      <div class="drop" id="drop-ref">
+        <div class="label">1 &middot; Reference file</div>
+        <div class="hint" id="hint-ref">Drop a <b>.gcode.3mf</b> or a sliced <b>.gcode</b>, or click to browse</div>
+        <div class="file hidden" id="file-ref"></div>
+      </div>
+      <div class="drop" id="drop-custom">
+        <div class="label">2 &middot; Grasshopper GCode</div>
+        <div class="hint" id="hint-custom">Drop a <b>.gcode</b> from GCodeGenerator, or click to browse</div>
+        <div class="file hidden" id="file-custom"></div>
+      </div>
+    </div>
+    <input type="file" id="input-ref" accept=".3mf,.gcode" class="hidden">
+    <input type="file" id="input-custom" accept=".gcode" class="hidden">
+  </div>
+
+  <div class="card hidden" id="printercard">
+    <h2>Printer</h2>
+    <div class="detected" id="detected">&nbsp;</div>
+    <div class="row wrapline">
+      <div class="field grow">
+        <label class="fl" for="printer">Model</label>
+        <select id="printer"></select>
+      </div>
+      <div class="field">
+        <label class="fl" for="firmware">Firmware</label>
+        <select id="firmware"></select>
+      </div>
+    </div>
+    <div class="row wrapline">
+      <div class="field narrow">
+        <label class="fl" for="bedx">Bed X (mm)</label>
+        <input type="number" id="bedx" min="1" step="1" placeholder="e.g. 420">
+      </div>
+      <div class="field narrow">
+        <label class="fl" for="bedy">Bed Y (mm)</label>
+        <input type="number" id="bedy" min="1" step="1" placeholder="e.g. 420">
+      </div>
+      <div class="field narrow">
+        <label class="fl" for="bedz">Max Z (mm)</label>
+        <input type="number" id="bedz" min="1" step="1" placeholder="e.g. 480">
+      </div>
+      <div class="field grow">
+        <label class="fl" for="pausecmd">Confirmation pause command</label>
+        <input type="text" id="pausecmd" placeholder="M0 / PAUSE / M601">
+      </div>
+    </div>
+    <div class="srcnote" id="srcnote"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="analyze" disabled>
+        <span class="spinner hidden" id="analyze-spinner"></span>
+        <span id="analyze-label">Analyze</span>
+      </button>
+      <button id="reset" class="secondary">Clear</button>
+    </div>
+    <div class="status"><span class="dot loading" id="dot"></span><span id="status">Loading Python runtime&hellip;</span></div>
+    <div class="bar hidden" id="bar"></div>
+  </div>
+
+  <div class="card hidden" id="analysis-card">
+    <h2>📊 Analysis Results</h2>
+    <div id="analysis-content"></div>
+    <div class="row" style="margin-top: 20px; gap: 10px;">
+      <button id="tweak-settings" class="secondary">← Back to Files</button>
+      <button id="tweak-button" style="background: var(--accent);">⚙️ Tweak Settings →</button>
+      <button id="analyze-process" style="background: var(--ok); flex: 1; min-width: 150px;">✓ Process Now</button>
+    </div>
+  </div>
+
+  <div class="card hidden" id="tweak-card">
+    <h2>⚙️ Tweak Settings</h2>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+      <!-- LEFT COLUMN: CONTROLS -->
+      <div>
+        <!-- SPEED MULTIPLIER -->
+        <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; margin-bottom: 14px; border-left: 4px solid var(--accent);">
+          <label class="fl" for="speed-mult" style="display: block; margin-bottom: 8px;">🚀 Speed Multiplier</label>
+          <input type="number" id="speed-mult" min="0.1" max="2.0" step="0.1" value="1.0" style="width: 100%; min-width: auto;">
+          <div style="font-size: 12px; color: var(--muted); margin-top: 8px;" id="speed-preview"></div>
+        </div>
+
+        <!-- FLOW MULTIPLIER -->
+        <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; margin-bottom: 14px; border-left: 4px solid var(--ok);">
+          <label class="fl" for="flow-mult" style="display: block; margin-bottom: 8px;">💧 Flow Multiplier</label>
+          <input type="number" id="flow-mult" min="0.1" max="2.0" step="0.1" value="1.0" style="width: 100%; min-width: auto;">
+          <div style="font-size: 12px; color: var(--muted); margin-top: 8px;" id="flow-preview"></div>
+        </div>
+
+        <!-- BED LEVELING -->
+        <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; border-left: 4px solid var(--warn);">
+          <label class="fl" style="display: flex; align-items: center; margin-bottom: 8px;">
+            <input type="checkbox" id="bed-leveling-toggle" style="width: 16px; height: 16px; margin-right: 8px;">
+            <span>🔧 Enable Bed Leveling</span>
+          </label>
+          <div style="font-size: 12px; color: var(--muted); margin-top: 8px;" id="bed-leveling-note"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: PREVIEW -->
+      <div>
+        <div style="background: var(--accent-soft); border-radius: 8px; padding: 14px; border: 1px solid var(--accent); height: 100%;">
+          <div style="font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 14px;">📊 Preview</div>
+          <div id="tweak-preview" style="font-size: 13px; line-height: 2;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: var(--muted);">Base Speed:</span>
+              <span style="font-weight: 700; font-size: 14px;" id="preview-speed">—</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: var(--muted);">Global Flow:</span>
+              <span style="font-weight: 700; font-size: 14px;" id="preview-flow">—</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: var(--muted);">Bed Leveling:</span>
+              <span style="font-weight: 700; font-size: 14px;" id="preview-bed-level">—</span>
+            </div>
+            <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);">
+              <div id="preview-warnings" style="font-size: 12px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WARNINGS BANNER -->
+    <div id="tweak-banners" style="margin-bottom: 16px;"></div>
+
+    <!-- ACTION BUTTONS -->
+    <div class="row" style="gap: 10px;">
+      <button id="tweak-back" class="secondary">← Back</button>
+      <button id="tweak-process" style="background: var(--ok); flex: 1; min-width: 200px;">✓ Process with These Settings</button>
+    </div>
+  </div>
+
+  <div class="card hidden" id="results">
+    <h2>Result</h2>
+    <div class="stats hidden" id="stats"></div>
+    <div class="estnote hidden" id="estnote"></div>
+    <div id="banners"></div>
+    <div class="dl">
+      <button id="dl-output" disabled>Download merged file</button>
+      <button id="dl-report" class="secondary" disabled>Download report</button>
+    </div>
+  </div>
+
+  <div class="card hidden" id="logcard">
+    <h2>Log</h2>
+    <pre class="log" id="log"></pre>
+  </div>
+
+  <footer>Powered by Pyodide &middot; running <code>gcode_merger.py</code> unmodified</footer>
+</div>
+
+<!--
+  ============================================================================
+  PRINTER PRESETS  --  this is the scaling seam for the printer dropdown.
+  ============================================================================
+  Each entry's `config` object is handed straight to GCodeMerger(config=...)
+  in Python, i.e. it behaves exactly like the old gcode_merge_config.yaml.
+
+  Keys the Python side reads today:
+     end_park_z   -> overrides the end-of-print bed park height (mm).
+                     Leave unset to auto-detect from the reference file's
+                     '; printable_height' line, which already works per-printer.
+
+  To add a printer:
+     1. Add an entry below, e.g.
+            a1m: { label: "Bambu Lab A1 mini", config: { end_park_z: 180 } },
+     2. If it needs a NEW knob, read it in gcode_merger.py via
+        self.config.get("your_key") and rebuild with build_web.py.
+-->
+<script type="text/x-printers" id="printer-presets">
+{
+  "auto": { "label": "Auto-detect from reference file", "config": {} }
+}
+</script>
+
+<script type="text/x-python" id="py-profiles">
+__PRINTER_PROFILES_PY__
+</script>
+
+<script type="text/x-python" id="py-merger">
+__GCODE_MERGER_PY__
+</script>
+
+<script type="text/x-python" id="py-driver">
+import json
+import shutil
+import traceback
+import zipfile
+from pathlib import Path
+
+import printer_profiles
+from gcode_merger import GCodeMerger
+
+PROJECT = Path("/project")
+
+
+def registry_json():
+    """The printer/firmware table, for the dropdowns.
+
+    Served from the Python module rather than duplicated in JavaScript, so the
+    machine the page shows you and the machine the merge validates against can
+    never be two different things.
+    """
+    return json.dumps(printer_profiles.as_dict())
+
+
+def inspect_reference(path):
+    """
+    Identify the printer in a dropped reference file, before any merge runs.
+
+    'path' is a file already written into the Pyodide filesystem.
+
+    Returns everything the info box needs: which machine the slicer named, what
+    the registry knows about it, and -- crucially -- whether the FILE ITSELF
+    declared a bed size and Z height. A file-declared value describes the actual
+    machine (possibly modified); a registry value is only a spec sheet. The UI
+    shows which one each number came from and lets either be corrected.
+    """
+    path = Path(path)
+    name = path.name
+    try:
+        if name.lower().endswith(".3mf"):
+            with zipfile.ZipFile(path) as zf:
+                raw = zf.read("Metadata/plate_1.gcode")
+        else:
+            raw = path.read_bytes()
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": "{}: {}".format(type(exc).__name__, exc)})
+
+    lines = raw.decode("utf-8", errors="replace").splitlines(keepends=True)
+    det = printer_profiles.detect_printer(lines)
+
+    # Config values the file declares for itself, in either slicer dialect.
+    declared = {}
+    config_lines, in_config, saw_block = [], False, False
+    for line in lines:
+        if "CONFIG_BLOCK_START" in line:
+            in_config, saw_block = True, True
+            continue
+        if "CONFIG_BLOCK_END" in line:
+            in_config = False
+            continue
+        if in_config:
+            config_lines.append(line)
+    scan = config_lines if saw_block else lines
+
+    def read(key):
+        needle = "; " + key
+        for line in scan:
+            s = line.strip()
+            if s.startswith(needle) and "=" in s:
+                head, _, val = s.partition("=")
+                if head.strip() == needle:
+                    return val.strip()
+        return None
+
+    for key in ("printable_area", "bed_shape"):
+        val = read(key)
+        if val:
+            xs, ys = [], []
+            for corner in val.split(","):
+                corner = corner.strip()
+                if "x" in corner:
+                    try:
+                        cx, cy = corner.split("x", 1)
+                        xs.append(float(cx))
+                        ys.append(float(cy))
+                    except ValueError:
+                        pass
+            if xs and ys:
+                declared["bed_x"] = max(xs) - min(xs)
+                declared["bed_y"] = max(ys) - min(ys)
+                declared["bed_source"] = "reference '; {}'".format(key)
+            break
+    for key in ("printable_height", "max_print_height"):
+        val = read(key)
+        if val:
+            try:
+                declared["printable_height"] = float(val)
+                declared["height_source"] = "reference '; {}'".format(key)
+            except ValueError:
+                pass
+            break
+    pause = read("machine_pause_gcode")
+    if pause:
+        declared["pause_gcode"] = pause
+        declared["pause_source"] = "reference '; machine_pause_gcode'"
+
+    prof = det.get("profile")
+    return json.dumps({
+        "ok": True,
+        "format": "3mf" if name.lower().endswith(".3mf") else "gcode",
+        "slug": det.get("slug"),
+        "label": prof["label"] if prof else None,
+        "vendor": prof["vendor"] if prof else None,
+        "declared_name": det.get("declared_name"),
+        "registry": ({"bed_x": prof["bed"][0], "bed_y": prof["bed"][1],
+                      "height": prof["height"], "firmware": prof["firmware"]}
+                     if prof else None),
+        "declared": declared,
+    })
+
+
+def reset_project():
+    """Start every run from an empty directory.
+
+    The merger locates its inputs by globbing the project directory, so a
+    leftover output from a previous run could otherwise be picked up as the
+    reference file. Wiping the directory each time makes that impossible.
+    """
+    if PROJECT.exists():
+        shutil.rmtree(PROJECT)
+    PROJECT.mkdir(parents=True)
+    return str(PROJECT)
+
+
+def analyze_files():
+    """
+    Pre-flight inspection of the two dropped files, for the Analyze card.
+
+    A thin wrapper: every number comes from GCodeMerger.analyze(), which the
+    CLI's --analyze also calls. The page draws the dict, the terminal prints it,
+    and neither can report something the other would not.
+    """
+    try:
+        merger = GCodeMerger(str(PROJECT), config_path=None, config=None)
+        return json.dumps(merger.analyze())
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "error": "{}: {}".format(type(exc).__name__, exc),
+            "traceback": traceback.format_exc(),
+        })
+
+
+
+def run_merge(config_json):
+    """Run the merge over /project and return a JSON summary for the UI."""
+    cfg = json.loads(config_json) if config_json else {}
+    try:
+        # The Tweak card's three values ride along in the same config object the
+        # Printer card fills in. They are NOT machine facts, so they are pulled
+        # back out here and handed to the merger's own apply_tweaks() -- the same
+        # call the CLI's --speed-multiplier / --flow-multiplier / --bed-leveling
+        # make. One implementation, so the page and the shell cannot diverge.
+        speed_mult = cfg.pop("speed_multiplier", 1.0)
+        flow_mult = cfg.pop("flow_multiplier", 1.0)
+        bed_level_override = cfg.pop("bed_leveling", None)
+
+        merger = GCodeMerger(str(PROJECT), config_path=None, config=cfg if cfg else None)
+        merger.apply_tweaks(speed_multiplier=speed_mult,
+                            flow_multiplier=flow_mult,
+                            bed_leveling=bed_level_override)
+        merger.run()
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "error": "{}: {}".format(type(exc).__name__, exc),
+            "traceback": traceback.format_exc(),
+        })
+    return json.dumps({
+        "ok": True,
+        "output_path": str(merger.output_path),
+        "output_name": merger.output_path.name,
+        "report_path": str(merger.report_path) if merger.report_path else None,
+        "report_name": merger.report_path.name if merger.report_path else None,
+        "warnings": merger.report.get("warnings", []),
+        "moves": merger.report.get("moves_processed", 0),
+        "estimates": merger.report.get("estimates", {}),
+        "settings": merger.settings,
+    })
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/pyodide@__PYODIDE_VERSION__/pyodide.js"></script>
+<script>
+const PYODIDE_INDEX = "https://cdn.jsdelivr.net/npm/pyodide@__PYODIDE_VERSION__/";
+
+const PRINTERS = JSON.parse(document.getElementById("printer-presets").textContent);
+
+const els = {
+  dot: document.getElementById("dot"),
+  status: document.getElementById("status"),
+  analyze: document.getElementById("analyze"),
+  analyzeLabel: document.getElementById("analyze-label"),
+  analyzeSpinner: document.getElementById("analyze-spinner"),
+  bar: document.getElementById("bar"),
+  reset: document.getElementById("reset"),
+  printer: document.getElementById("printer"),
+  firmware: document.getElementById("firmware"),
+  printercard: document.getElementById("printercard"),
+  detected: document.getElementById("detected"),
+  bedx: document.getElementById("bedx"),
+  bedy: document.getElementById("bedy"),
+  bedz: document.getElementById("bedz"),
+  pausecmd: document.getElementById("pausecmd"),
+  srcnote: document.getElementById("srcnote"),
+  analysisCard: document.getElementById("analysis-card"),
+  analysisContent: document.getElementById("analysis-content"),
+  tweakCard: document.getElementById("tweak-card"),
+  tweakSettings: document.getElementById("tweak-settings"),
+  tweakButton: document.getElementById("tweak-button"),
+  analyzeProcess: document.getElementById("analyze-process"),
+  speedMult: document.getElementById("speed-mult"),
+  flowMult: document.getElementById("flow-mult"),
+  bedLevelingToggle: document.getElementById("bed-leveling-toggle"),
+  speedPreview: document.getElementById("speed-preview"),
+  flowPreview: document.getElementById("flow-preview"),
+  bedLevelingNote: document.getElementById("bed-leveling-note"),
+  tweakPreview: document.getElementById("tweak-preview"),
+  previewSpeed: document.getElementById("preview-speed"),
+  previewFlow: document.getElementById("preview-flow"),
+  previewBedLevel: document.getElementById("preview-bed-level"),
+  previewWarnings: document.getElementById("preview-warnings"),
+  tweakBanners: document.getElementById("tweak-banners"),
+  tweakBack: document.getElementById("tweak-back"),
+  tweakProcess: document.getElementById("tweak-process"),
+  results: document.getElementById("results"),
+  stats: document.getElementById("stats"),
+  estnote: document.getElementById("estnote"),
+  banners: document.getElementById("banners"),
+  logcard: document.getElementById("logcard"),
+  log: document.getElementById("log"),
+  dlOutput: document.getElementById("dl-output"),
+  dlReport: document.getElementById("dl-report"),
+};
+
+let pyodide = null;
+let pyReady = false;
+let busy = false;
+let doneFlashTimer = null;
+const picked = { ref: null, custom: null };
+let lastResult = null;
+
+// A merge on a normal path takes well under a second, which is fast enough to
+// look like nothing happened. Hold the busy state briefly so the spinner is
+// actually perceivable, then flash a success state on the button.
+const MIN_BUSY_MS = 650;
+const DONE_FLASH_MS = 2000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Resolve after the browser has actually painted. Needed before the blocking
+// Pyodide call so the spinner is on screen and animating before the main
+// thread stalls -- otherwise it only appears once the work is already done.
+const nextPaint = () =>
+  new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+function setStatus(text, state) {
+  els.status.textContent = text;
+  els.dot.className = "dot" + (state ? " " + state : "");
+}
+
+function logLine(text, cls) {
+  els.logcard.classList.remove("hidden");
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text + "\n";
+  els.log.appendChild(span);
+  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function refreshProcessButton() {
+  const filesReady = pyReady && picked.ref && picked.custom;
+  const volumeReady = !picked.ref || volumeComplete();
+  els.analyze.disabled = busy || !(filesReady && volumeReady);
+  for (const id of ["bedx", "bedy", "bedz"]) {
+    const v = parseFloat(els[id].value);
+    els[id].parentElement.classList.toggle("needed", !!picked.ref && !(isFinite(v) && v > 0));
+  }
+  if (filesReady && !volumeReady) {
+    setStatus("Enter the build volume before analyzing.", "loading");
+  }
+}
+
+function setBusy(on) {
+  busy = on;
+  els.analyzeSpinner.classList.toggle("hidden", !on);
+  els.bar.classList.toggle("hidden", !on);
+  els.analyze.classList.toggle("busy", on);
+  if (on) {
+    clearTimeout(doneFlashTimer);
+    els.analyze.classList.remove("done");
+    els.analyzeLabel.textContent = "Analyzing…";
+  }
+  refreshProcessButton();
+}
+
+function flashDone() {
+  els.analyze.classList.add("done");
+  els.analyzeLabel.textContent = "✓ Analyzed";
+  doneFlashTimer = setTimeout(() => {
+    els.analyze.classList.remove("done");
+    els.analyzeLabel.textContent = "Analyze";
+  }, DONE_FLASH_MS);
+}
+
+// ---- printer card ---------------------------------------------------------
+// The registry is pulled from printer_profiles.py through Pyodide rather than
+// duplicated here, so the machine this page shows you and the machine the
+// merge validates against are the same object.
+let REGISTRY = { printers: [], firmwares: [] };
+let refInfo = null;
+let pendingInspect = null;
+
+// Where each field's current value came from. 'file' means the reference
+// declared it, and those are NOT sent back as overrides: letting Python read
+// them itself keeps the report honest about provenance, and a file-declared
+// value describes the real machine while a registry value is only a spec sheet.
+const fieldSource = { bed: null, height: null, pause: null, firmware: null };
+
+function populateRegistryUI() {
+  els.printer.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto — from the reference file";
+  els.printer.appendChild(auto);
+
+  let group = null;
+  for (const p of REGISTRY.printers) {
+    if (!group || group.label !== p.vendor) {
+      group = document.createElement("optgroup");
+      group.label = p.vendor;
+      els.printer.appendChild(group);
+    }
+    const opt = document.createElement("option");
+    opt.value = p.slug;
+    opt.textContent = `${p.label} — ${p.bed_x}×${p.bed_y}×${p.height} mm`;
+    group.appendChild(opt);
+  }
+
+  els.firmware.innerHTML = "";
+  for (const f of REGISTRY.firmwares) {
+    const opt = document.createElement("option");
+    opt.value = f.key;
+    opt.textContent = f.label + (f.pause_gcode ? ` — pause: ${f.pause_gcode}` : "");
+    els.firmware.appendChild(opt);
+  }
+}
+
+function firmwareByKey(key) {
+  return REGISTRY.firmwares.find((f) => f.key === key) || null;
+}
+
+function applyPrinterSlug(slug, source) {
+  const p = REGISTRY.printers.find((x) => x.slug === slug);
+  if (!p) return;
+  els.bedx.value = p.bed_x;
+  els.bedy.value = p.bed_y;
+  els.bedz.value = p.height;
+  els.firmware.value = p.firmware;
+  fieldSource.bed = source;
+  fieldSource.height = source;
+  fieldSource.firmware = source;
+  const fw = firmwareByKey(p.firmware);
+  if (fw && fieldSource.pause !== "file") {
+    els.pausecmd.value = fw.pause_gcode || "";
+    fieldSource.pause = source;
+  }
+}
+
+// Show what the reference actually said about the machine, then let any of it
+// be corrected. An unrecognised printer is not an error -- it just means the
+// build volume has to be typed in, because the fatal volume check cannot run
+// against bounds nobody supplied.
+function renderPrinterCard(info) {
+  refInfo = info;
+  els.printercard.classList.remove("hidden");
+  fieldSource.bed = fieldSource.height = fieldSource.pause = fieldSource.firmware = null;
+  els.bedx.value = els.bedy.value = els.bedz.value = "";
+  els.pausecmd.value = "";
+
+  if (info.slug) {
+    els.printer.value = info.slug;
+    applyPrinterSlug(info.slug, "registry");
+  } else {
+    els.printer.value = "";
+    els.firmware.value = info.format === "3mf" ? "bambu" : "marlin";
+    fieldSource.firmware = "default";
+    const fw = firmwareByKey(els.firmware.value);
+    if (fw) { els.pausecmd.value = fw.pause_gcode || ""; fieldSource.pause = "default"; }
+  }
+
+  // Anything the file declared for itself wins over the table.
+  const d = info.declared || {};
+  if (d.bed_x && d.bed_y) {
+    els.bedx.value = round1(d.bed_x);
+    els.bedy.value = round1(d.bed_y);
+    fieldSource.bed = "file";
+  }
+  if (d.printable_height) {
+    els.bedz.value = round1(d.printable_height);
+    fieldSource.height = "file";
+  }
+  if (d.pause_gcode) {
+    els.pausecmd.value = d.pause_gcode;
+    fieldSource.pause = "file";
+  }
+
+  if (info.slug) {
+    els.detected.className = "detected known";
+    els.detected.innerHTML =
+      `Detected: <b>${escapeHtml(info.label)}</b>` +
+      `<span class="small">The reference names it “${escapeHtml(info.declared_name || "—")}”. ` +
+      `Check the build volume below and correct it if your machine differs.</span>`;
+  } else {
+    els.detected.className = "detected unknown";
+    els.detected.innerHTML =
+      `Printer not recognised` +
+      (info.declared_name ? ` — the reference names it “${escapeHtml(info.declared_name)}”` : "") +
+      `<span class="small">Pick the closest model above, or type your build volume below. ` +
+      `Without it the build-volume safety check cannot run, so Process stays disabled.</span>`;
+  }
+  renderSourceNote();
+  refreshProcessButton();
+}
+
+function labelForSource(s) {
+  return { file: "declared by the reference file", registry: "from the printer table",
+           manual: "entered by you", default: "firmware default" }[s] || "not set";
+}
+
+function renderSourceNote() {
+  const bits = [
+    `Bed X/Y: ${labelForSource(fieldSource.bed)}`,
+    `Max Z: ${labelForSource(fieldSource.height)}`,
+    `Pause command: ${labelForSource(fieldSource.pause)}`,
+  ];
+  els.srcnote.textContent = bits.join(" · ") +
+    " — values declared by the reference describe your actual machine and are used as-is; " +
+    "table values are manufacturer specs. Editing any field overrides both.";
+}
+
+function round1(v) { return Math.round(v * 10) / 10; }
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function volumeComplete() {
+  return ["bedx", "bedy", "bedz"].every((id) => {
+    const v = parseFloat(els[id].value);
+    return isFinite(v) && v > 0;
+  });
+}
+
+els.printer.addEventListener("change", () => {
+  if (els.printer.value) applyPrinterSlug(els.printer.value, "manual");
+  renderSourceNote();
+  refreshProcessButton();
+});
+els.firmware.addEventListener("change", () => {
+  fieldSource.firmware = "manual";
+  const fw = firmwareByKey(els.firmware.value);
+  if (fw) { els.pausecmd.value = fw.pause_gcode || ""; fieldSource.pause = "manual"; }
+  renderSourceNote();
+});
+for (const [id, key] of [["bedx", "bed"], ["bedy", "bed"], ["bedz", "height"], ["pausecmd", "pause"]]) {
+  els[id].addEventListener("input", () => {
+    fieldSource[key] = "manual";
+    renderSourceNote();
+    refreshProcessButton();
+  });
+}
+
+// Inspect a dropped reference immediately: the printer has to be settled
+// before Process, not discovered halfway through a merge.
+async function inspectReference(file) {
+  // Pyodide takes a few seconds to arrive on a cold load and a file can be
+  // dropped before then. Remember it and re-run from boot(), otherwise the
+  // card never appears and Process stays disabled with nothing to fix.
+  if (!pyReady) { pendingInspect = file; return; }
+  pendingInspect = null;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    pyodide.FS.mkdirTree("/scratch");
+    const path = "/scratch/" + file.name;
+    pyodide.FS.writeFile(path, bytes);
+    const info = JSON.parse(pyodide.globals.get("inspect_reference")(path));
+    if (!info.ok) {
+      showBanner("Could not read the reference file: " + info.error, "err");
+      renderPrinterCard({ ok: false, slug: null, declared_name: null,
+                          format: file.name.toLowerCase().endsWith(".3mf") ? "3mf" : "gcode",
+                          registry: null, declared: {} });
+      return;
+    }
+    renderPrinterCard(info);
+  } catch (err) {
+    showBanner("Could not inspect the reference file: " + err, "err");
+    renderPrinterCard({ ok: false, slug: null, declared_name: null, format: "gcode",
+                        registry: null, declared: {} });
+  }
+}
+
+// ---- Analyze & Tweak workflow -------------------------------------------------
+let analysisResult = null;
+
+function createVolumeVisualization(geometry, refInfo) {
+  // Get bed dimensions
+  const bedX = refInfo ? refInfo.bed_x : 220;
+  const bedY = refInfo ? refInfo.bed_y : 220;
+  const bedZ = refInfo ? refInfo.height : 250;
+
+  // Get part bounds
+  const partXMin = geometry.x.min !== null ? geometry.x.min : 0;
+  const partXMax = geometry.x.max !== null ? geometry.x.max : bedX;
+  const partYMin = geometry.y.min !== null ? geometry.y.min : 0;
+  const partYMax = geometry.y.max !== null ? geometry.y.max : bedY;
+  const partZMin = geometry.z.min !== null ? geometry.z.min : 0;
+  const partZMax = geometry.z.max !== null ? geometry.z.max : bedZ;
+
+  const partWidth = partXMax - partXMin;
+  const partDepth = partYMax - partYMin;
+  const partHeight = partZMax - partZMin;
+
+  // SVG setup with more space for labels
+  const svgWidth = 420;
+  const svgHeight = 320;
+
+  // Axonometric projection with better scaling
+  const scale = 0.35; // Smaller scale to fit labels
+  const centerX = svgWidth / 2.2;
+  const centerY = svgHeight / 2;
+
+  function project(x, y, z) {
+    // Isometric: X goes right-down, Y goes left-down, Z goes straight up
+    const px = centerX + (x * Math.cos(Math.PI / 6) - y * Math.cos(Math.PI / 6)) * scale;
+    const py = centerY + (x * Math.sin(Math.PI / 6) + y * Math.sin(Math.PI / 6)) * scale - z * scale;
+    return { x: px, y: py };
+  }
+
+  // Build volume corners
+  const bed = {
+    p000: project(0, 0, 0),
+    p100: project(bedX, 0, 0),
+    p010: project(0, bedY, 0),
+    p110: project(bedX, bedY, 0),
+    p001: project(0, 0, bedZ),
+    p101: project(bedX, 0, bedZ),
+    p011: project(0, bedY, bedZ),
+    p111: project(bedX, bedY, bedZ),
+  };
+
+  // Part corners
+  const part = {
+    p000: project(partXMin, partYMin, partZMin),
+    p100: project(partXMax, partYMin, partZMin),
+    p010: project(partXMin, partYMax, partZMin),
+    p110: project(partXMax, partYMax, partZMin),
+    p001: project(partXMin, partYMin, partZMax),
+    p101: project(partXMax, partYMin, partZMax),
+    p011: project(partXMin, partYMax, partZMax),
+    p111: project(partXMax, partYMax, partZMax),
+  };
+
+  const svg = `
+    <svg width="${svgWidth}" height="${svgHeight}" style="background: var(--panel); border: 1px solid var(--border); border-radius: 6px;">
+      <defs>
+        <style>
+          .bed-edge { stroke: var(--muted); stroke-width: 1; opacity: 0.6; }
+          .bed-edge-front { stroke: var(--border); stroke-width: 1.5; opacity: 0.8; }
+          .part-edge { stroke: var(--accent); stroke-width: 2; }
+          .part-face { fill: var(--accent); opacity: 0.1; }
+          .dim-label { font-size: 11px; font-weight: 600; fill: var(--text); }
+          .bed-dim { fill: var(--muted); opacity: 0.7; }
+          .part-dim { fill: var(--accent); }
+          .axis-label { font-size: 10px; font-weight: 700; fill: var(--muted); text-transform: uppercase; }
+        </style>
+      </defs>
+
+      <!-- ORIGIN POINT -->
+      <circle cx="${bed.p000.x}" cy="${bed.p000.y}" r="3" fill="var(--accent)" opacity="0.5"/>
+
+      <!-- BUILD VOLUME CUBE (gray, dashed/thin) -->
+      <!-- Bottom face (bed surface) -->
+      <line x1="${bed.p000.x}" y1="${bed.p000.y}" x2="${bed.p100.x}" y2="${bed.p100.y}" class="bed-edge-front"/>
+      <line x1="${bed.p100.x}" y1="${bed.p100.y}" x2="${bed.p110.x}" y2="${bed.p110.y}" class="bed-edge-front"/>
+      <line x1="${bed.p110.x}" y1="${bed.p110.y}" x2="${bed.p010.x}" y2="${bed.p010.y}" class="bed-edge-front"/>
+      <line x1="${bed.p010.x}" y1="${bed.p010.y}" x2="${bed.p000.x}" y2="${bed.p000.y}" class="bed-edge-front"/>
+
+      <!-- Top face -->
+      <line x1="${bed.p001.x}" y1="${bed.p001.y}" x2="${bed.p101.x}" y2="${bed.p101.y}" class="bed-edge"/>
+      <line x1="${bed.p101.x}" y1="${bed.p101.y}" x2="${bed.p111.x}" y2="${bed.p111.y}" class="bed-edge"/>
+      <line x1="${bed.p111.x}" y1="${bed.p111.y}" x2="${bed.p011.x}" y2="${bed.p011.y}" class="bed-edge"/>
+      <line x1="${bed.p011.x}" y1="${bed.p011.y}" x2="${bed.p001.x}" y2="${bed.p001.y}" class="bed-edge"/>
+
+      <!-- Vertical edges -->
+      <line x1="${bed.p000.x}" y1="${bed.p000.y}" x2="${bed.p001.x}" y2="${bed.p001.y}" class="bed-edge"/>
+      <line x1="${bed.p100.x}" y1="${bed.p100.y}" x2="${bed.p101.x}" y2="${bed.p101.y}" class="bed-edge"/>
+      <line x1="${bed.p110.x}" y1="${bed.p110.y}" x2="${bed.p111.x}" y2="${bed.p111.y}" class="bed-edge"/>
+      <line x1="${bed.p010.x}" y1="${bed.p010.y}" x2="${bed.p011.x}" y2="${bed.p011.y}" class="bed-edge"/>
+
+      <!-- PART BOUNDING BOX (blue, solid) -->
+      <!-- Bottom face -->
+      <polygon points="${part.p000.x},${part.p000.y} ${part.p100.x},${part.p100.y} ${part.p110.x},${part.p110.y} ${part.p010.x},${part.p010.y}" class="part-face"/>
+      <!-- Top face -->
+      <polygon points="${part.p001.x},${part.p001.y} ${part.p101.x},${part.p101.y} ${part.p111.x},${part.p111.y} ${part.p011.x},${part.p011.y}" class="part-face" opacity="0.2"/>
+      <!-- Front face -->
+      <polygon points="${part.p000.x},${part.p000.y} ${part.p100.x},${part.p100.y} ${part.p101.x},${part.p101.y} ${part.p001.x},${part.p001.y}" class="part-face" opacity="0.15"/>
+
+      <!-- Bottom face edges -->
+      <line x1="${part.p000.x}" y1="${part.p000.y}" x2="${part.p100.x}" y2="${part.p100.y}" class="part-edge"/>
+      <line x1="${part.p100.x}" y1="${part.p100.y}" x2="${part.p110.x}" y2="${part.p110.y}" class="part-edge"/>
+      <line x1="${part.p110.x}" y1="${part.p110.y}" x2="${part.p010.x}" y2="${part.p010.y}" class="part-edge"/>
+      <line x1="${part.p010.x}" y1="${part.p010.y}" x2="${part.p000.x}" y2="${part.p000.y}" class="part-edge"/>
+
+      <!-- Top face edges -->
+      <line x1="${part.p001.x}" y1="${part.p001.y}" x2="${part.p101.x}" y2="${part.p101.y}" class="part-edge"/>
+      <line x1="${part.p101.x}" y1="${part.p101.y}" x2="${part.p111.x}" y2="${part.p111.y}" class="part-edge"/>
+      <line x1="${part.p111.x}" y1="${part.p111.y}" x2="${part.p011.x}" y2="${part.p011.y}" class="part-edge"/>
+      <line x1="${part.p011.x}" y1="${part.p011.y}" x2="${part.p001.x}" y2="${part.p001.y}" class="part-edge"/>
+
+      <!-- Vertical edges -->
+      <line x1="${part.p000.x}" y1="${part.p000.y}" x2="${part.p001.x}" y2="${part.p001.y}" class="part-edge"/>
+      <line x1="${part.p100.x}" y1="${part.p100.y}" x2="${part.p101.x}" y2="${part.p101.y}" class="part-edge"/>
+      <line x1="${part.p110.x}" y1="${part.p110.y}" x2="${part.p111.x}" y2="${part.p111.y}" class="part-edge"/>
+      <line x1="${part.p010.x}" y1="${part.p010.y}" x2="${part.p011.x}" y2="${part.p011.y}" class="part-edge"/>
+
+      <!-- BUILD VOLUME DIMENSIONS (outside) -->
+      <text x="${bed.p100.x + 15}" y="${bed.p100.y + 8}" class="dim-label bed-dim">${bedX.toFixed(0)} mm (X)</text>
+      <text x="${bed.p010.x - 20}" y="${bed.p010.y + 20}" class="dim-label bed-dim">${bedY.toFixed(0)} mm (Y)</text>
+      <text x="${bed.p001.x - 35}" y="${bed.p001.y - 5}" class="dim-label bed-dim">${bedZ.toFixed(0)} mm (Z)</text>
+
+      <!-- PART DIMENSIONS (outside, prominent) -->
+      <g>
+        <line x1="${part.p100.x}" y1="${part.p100.y + 25}" x2="${part.p100.x + 25}" y2="${part.p100.y + 25}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
+        <text x="${(part.p000.x + part.p100.x) / 2}" y="${part.p100.y + 40}" text-anchor="middle" class="dim-label part-dim">
+          ${partWidth.toFixed(0)} mm (X)
+        </text>
+      </g>
+
+      <g>
+        <line x1="${part.p010.x - 25}" y1="${part.p010.y}" x2="${part.p010.x - 25}" y2="${part.p010.y + 25}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
+        <text x="${part.p010.x - 40}" y="${(part.p000.y + part.p010.y) / 2 + 4}" text-anchor="end" class="dim-label part-dim">
+          ${partDepth.toFixed(0)} mm (Y)
+        </text>
+      </g>
+
+      <g>
+        <line x1="${part.p001.x - 25}" y1="${part.p001.y}" x2="${part.p001.x - 25}" y2="${part.p001.y + 25}" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
+        <text x="${part.p001.x - 42}" y="${(part.p000.y + part.p001.y) / 2 + 4}" text-anchor="end" class="dim-label part-dim">
+          ${partHeight.toFixed(0)} mm (Z)
+        </text>
+      </g>
+
+      <!-- LEGEND -->
+      <rect x="12" y="12" width="10" height="10" stroke="var(--accent)" stroke-width="1.5" fill="var(--accent)" opacity="0.15"/>
+      <text x="28" y="21" font-size="10" fill="var(--text)">Part</text>
+
+      <line x1="12" y1="32" x2="22" y2="32" stroke="var(--border)" stroke-width="1.5" opacity="0.6"/>
+      <text x="28" y="37" font-size="10" fill="var(--text)">Build Volume</text>
+    </svg>
+  `;
+
+  return svg;
+}
+
+async function analyze() {
+  if (busy || !pyReady) return;
+  clearResults();
+  setBusy(true);
+  const started = performance.now();
+
+  try {
+    setStatus("Reading input files…", "loading");
+    await nextPaint();
+
+    const projectDir = pyodide.globals.get("reset_project")();
+    for (const file of [picked.ref, picked.custom]) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      pyodide.FS.writeFile(projectDir + "/" + file.name, bytes);
+    }
+
+    setStatus("Analyzing geometry and settings…", "loading");
+    await nextPaint();
+
+    const raw = pyodide.globals.get("analyze_files")();
+    analysisResult = JSON.parse(raw);
+
+    const workMs = performance.now() - started;
+    if (workMs < MIN_BUSY_MS) await sleep(MIN_BUSY_MS - workMs);
+
+    if (!analysisResult.ok) {
+      setBusy(false);
+      setStatus("Analysis failed.", "error");
+      showBanner(analysisResult.error, "err");
+      return;
+    }
+
+    setBusy(false);
+    setStatus("Analysis complete.", "ready");
+    flashDone();
+    renderAnalysisCard(analysisResult);
+  } catch (err) {
+    setBusy(false);
+    setStatus("Analysis failed.", "error");
+    showBanner("Analysis error: " + err.message, "err");
+  }
+}
+
+function renderAnalysisCard(result) {
+  els.analysisCard.classList.remove("hidden");
+  const c = result.current_settings;
+  const g = result.geometry;
+  const v = result.per_step_variations;
+  const p = result.pauses;
+  const r = result.reference_info;
+
+  let html = `
+    <div style="display: grid; gap: 16px;">
+      <!-- GEOMETRY SECTION -->
+      <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; border-left: 4px solid var(--accent);">
+        <h3 style="font-size: 13px; margin: 0 0 14px; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">📐 Geometry</h3>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start;">
+          <!-- LEFT: STATS -->
+          <div>
+            <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
+              <div>
+                <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">Total Moves</div>
+                <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${result.geometry.move_count.toLocaleString()}</div>
+              </div>
+              <div>
+                <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">X Bounds</div>
+                <div style="font-size: 13px; margin-top: 4px;">${g.x.min !== null ? (g.x.min.toFixed(1) + " … " + g.x.max.toFixed(1)) : "—"}</div>
+                <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Δ ${g.x.min !== null ? (g.x.max - g.x.min).toFixed(1) : "—"} mm</div>
+              </div>
+              <div>
+                <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">Y Bounds</div>
+                <div style="font-size: 13px; margin-top: 4px;">${g.y.min !== null ? (g.y.min.toFixed(1) + " … " + g.y.max.toFixed(1)) : "—"}</div>
+                <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Δ ${g.y.min !== null ? (g.y.max - g.y.min).toFixed(1) : "—"} mm</div>
+              </div>
+              <div>
+                <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">Z Bounds</div>
+                <div style="font-size: 13px; margin-top: 4px;">${g.z.min !== null ? (g.z.min.toFixed(1) + " … " + g.z.max.toFixed(1)) : "—"}</div>
+                <div style="font-size: 10px; color: var(--muted); margin-top: 2px;">Δ ${g.z.min !== null ? (g.z.max - g.z.min).toFixed(1) : "—"} mm</div>
+              </div>
+              <div style="border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px;">
+                <div style="font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600;">GH Pauses (Per-Point)</div>
+                <div style="font-size: 12px; margin-top: 4px;">
+                  ${p.confirm_count === 0 && p.timed_count === 0 ? 'None (no ;GH PAUSE tags)' : `<span style="color: var(--accent); font-weight: 600;">${p.confirm_count}</span> confirm · <span style="color: var(--accent); font-weight: 600;">${p.timed_count}</span> timed (${(p.total_pause_ms / 1000).toFixed(1)}s)`}
+                </div>
+                <div style="font-size: 10px; color: var(--muted); margin-top: 6px;">
+                  ℹ️ G4 dwells from reference will show after processing
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT: VISUALIZATION -->
+          <div style="display: flex; justify-content: center;">
+            ${createVolumeVisualization(g, {
+              bed_x: parseFloat(els.bedx.value) || 220,
+              bed_y: parseFloat(els.bedy.value) || 220,
+              height: parseFloat(els.bedz.value) || 250
+            })}
+          </div>
+        </div>
+      </div>
+
+      <!-- CURRENT SETTINGS SECTION -->
+      <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; border-left: 4px solid var(--ok);">
+        <h3 style="font-size: 13px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">⚙️ Current Settings (from Files)</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; font-size: 13px;">
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Base Speed</div>
+            <div style="font-size: 18px; font-weight: 700;">${c.base_speed_mm_s} <span style="font-size: 12px; font-weight: 500; color: var(--muted);">mm/s</span></div>
+          </div>
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Global Flow</div>
+            <div style="font-size: 18px; font-weight: 700;">${c.global_flow} <span style="font-size: 12px; font-weight: 500; color: var(--muted);">x</span></div>
+          </div>
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Nozzle Diameter</div>
+            <div style="font-size: 13px;">${c.nozzle_diameter_mm} mm</div>
+          </div>
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Filament Diameter</div>
+            <div style="font-size: 13px;">${c.filament_diameter_mm} mm</div>
+          </div>
+          ${c.material_type ? `
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Material</div>
+            <div style="font-size: 13px;">${c.material_type}</div>
+          </div>` : ''}
+          <div>
+            <div style="color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Bed Leveling</div>
+            <div style="font-size: 13px; font-weight: 600; color: ${c.bed_leveling_enabled ? 'var(--ok)' : 'var(--warn)'};">${c.bed_leveling_enabled ? '✓ ENABLED' : '✗ Disabled'}</div>
+          </div>
+        </div>
+        <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted);">
+          Reference has bed leveling commands: <b>${r.has_bed_leveling ? 'Yes' : 'No'}</b> | Firmware: <b>${r.firmware}</b>
+        </div>
+      </div>
+
+      <!-- PER-STEP VARIATIONS SECTION -->
+      <div style="background: var(--panel-2); border-radius: 8px; padding: 14px; border-left: 4px solid ${v.speed_varied || v.flow_varied ? 'var(--warn)' : 'var(--border)'};">
+        <h3 style="font-size: 13px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">🏷️ Per-Step Variations</h3>
+        <div style="font-size: 13px; line-height: 2;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span><b>Speed Tags:</b> ${v.speed_tags_found} / ${result.geometry.move_count} moves</span>
+            ${v.speed_varied ? `<span style="background: var(--warn-soft); color: var(--warn); padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">VARIED ${v.speed_min_mult.toFixed(2)}–${v.speed_max_mult.toFixed(2)}x</span>` : `<span style="color: var(--muted); font-size: 12px;">(constant)</span>`}
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+            <span><b>Flow Tags:</b> ${v.flow_tags_found} / ${result.geometry.move_count} moves</span>
+            ${v.flow_varied ? `<span style="background: var(--warn-soft); color: var(--warn); padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">VARIED ${v.flow_min_mult.toFixed(4)}–${v.flow_max_mult.toFixed(4)}x</span>` : `<span style="color: var(--muted); font-size: 12px;">(constant)</span>`}
+          </div>
+        </div>
+      </div>
+  `;
+
+  // Consistency flags
+  let flags = [];
+  if (v.speed_varied) {
+    flags.push({ level: "warn", msg: `Speed varies across ${v.speed_tags_found} moves. Adjusting base speed will scale all of them proportionally.` });
+  }
+  if (v.flow_varied) {
+    flags.push({ level: "warn", msg: `Flow varies across ${v.flow_tags_found} moves. Adjusting global flow will scale all of them proportionally.` });
+  }
+  if (g.z.max !== null && g.z.max > 250) {
+    flags.push({ level: "warn", msg: `Geometry reaches Z${g.z.max.toFixed(1)} mm. Check your printable height limit.` });
+  }
+
+  if (flags.length > 0) {
+    html += `<div style="background: var(--warn-soft); border-radius: 8px; padding: 12px; border-left: 4px solid var(--warn);">
+      <h3 style="font-size: 13px; margin: 0 0 8px; color: var(--warn); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">⚠️ Flags</h3>`;
+    for (const f of flags) {
+      html += `<div style="color: var(--warn); font-size: 12px; margin-bottom: 6px; line-height: 1.5;">• ${f.msg}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  els.analysisContent.innerHTML = html;
+
+  // Initialize tweak settings with defaults
+  els.speedMult.value = "1.0";
+  els.flowMult.value = "1.0";
+  els.bedLevelingToggle.checked = c.bed_leveling_enabled;
+  updateTweakPreview();
+}
+
+function updateTweakPreview() {
+  const speedMult = parseFloat(els.speedMult.value) || 1.0;
+  const flowMult = parseFloat(els.flowMult.value) || 1.0;
+  const bedLevel = els.bedLevelingToggle.checked;
+
+  if (!analysisResult) return;
+
+  const c = analysisResult.current_settings;
+  const v = analysisResult.per_step_variations;
+
+  const newBaseSpeed = c.base_speed_mm_s * speedMult;
+  const newGlobalFlow = c.global_flow * flowMult;
+
+  // Calculate speed range if variable speeds exist
+  let speedWarning = "";
+  if (v.speed_varied) {
+    const speedMin = c.base_speed_mm_s * v.speed_min_mult * speedMult;
+    const speedMax = c.base_speed_mm_s * v.speed_max_mult * speedMult;
+    let speedClamped = [];
+    if (speedMin < 3.0) speedClamped.push("min clamped to 3.0 mm/s");
+    if (speedMax > 300.0) speedClamped.push("max clamped to 300.0 mm/s");
+    if (speedClamped.length > 0) {
+      speedWarning = `<div style="color: var(--warn);">⚠️ ${speedClamped.join(", ")}</div>`;
+    }
+  }
+
+  // Calculate flow warning
+  let flowWarning = "";
+  if (v.flow_varied) {
+    const flowMin = c.global_flow * v.flow_min_mult * flowMult;
+    const flowMax = c.global_flow * v.flow_max_mult * flowMult;
+    flowWarning = `<div style="font-size: 12px; color: var(--muted);">Flow range: ${flowMin.toFixed(4)}–${flowMax.toFixed(4)}x</div>`;
+  }
+
+  els.previewSpeed.textContent = `${newBaseSpeed.toFixed(1)} mm/s`;
+  els.previewFlow.textContent = `${newGlobalFlow.toFixed(3)}x`;
+  els.previewBedLevel.textContent = bedLevel ? "ENABLED" : "disabled";
+  els.previewWarnings.innerHTML = speedWarning + flowWarning;
+
+  els.speedPreview.textContent = v.speed_varied ?
+    `Range: ${(c.base_speed_mm_s * v.speed_min_mult * speedMult).toFixed(1)}–${(c.base_speed_mm_s * v.speed_max_mult * speedMult).toFixed(1)} mm/s` : "";
+  els.flowPreview.textContent = v.flow_varied ?
+    `Range: ${(c.global_flow * v.flow_min_mult * flowMult).toFixed(4)}–${(c.global_flow * v.flow_max_mult * flowMult).toFixed(4)}x` : "";
+  els.bedLevelingNote.textContent = analysisResult.reference_info.has_bed_leveling ?
+    "Reference has bed leveling commands (will be stripped if disabled)" :
+    "Reference does not have bed leveling commands";
+}
+
+function hideAllCards() {
+  els.analysisCard.classList.add("hidden");
+  els.tweakCard.classList.add("hidden");
+  els.results.classList.add("hidden");
+}
+
+function showTweakCard() {
+  els.analysisCard.classList.add("hidden");
+  els.tweakCard.classList.remove("hidden");
+  updateTweakPreview();
+}
+
+function backFromTweak() {
+  hideAllCards();
+  els.analysisCard.classList.remove("hidden");
+}
+
+async function processWithSettings() {
+  if (busy || !pyReady || !analysisResult) return;
+
+  const speedMult = parseFloat(els.speedMult.value) || 1.0;
+  const flowMult = parseFloat(els.flowMult.value) || 1.0;
+  const bedLevel = els.bedLevelingToggle.checked;
+
+  // Check for clamping issues
+  const c = analysisResult.current_settings;
+  const v = analysisResult.per_step_variations;
+
+  let clampWarnings = [];
+  if (v.speed_varied) {
+    const speedMin = c.base_speed_mm_s * v.speed_min_mult * speedMult;
+    const speedMax = c.base_speed_mm_s * v.speed_max_mult * speedMult;
+    if (speedMin < 3.0 || speedMax > 300.0) {
+      clampWarnings.push(`Speed would exceed safe range [3.0–300.0 mm/s] (would be ${speedMin.toFixed(1)}–${speedMax.toFixed(1)})`);
+    }
+  } else {
+    const speed = c.base_speed_mm_s * speedMult;
+    if (speed < 3.0 || speed > 300.0) {
+      clampWarnings.push(`Speed would be ${speed.toFixed(1)} mm/s (safe range: 3.0–300.0)`);
+    }
+  }
+
+  if (clampWarnings.length > 0) {
+    els.tweakBanners.innerHTML = `<div class="banner warn"><span class="mark">!</span><span>⚠️ ${clampWarnings[0]} — Click again to confirm and process anyway</span></div>`;
+    const originalText = els.tweakProcess.textContent;
+    els.tweakProcess.textContent = "Confirm & Process";
+    els.tweakProcess.onclick = () => {
+      els.tweakBanners.innerHTML = "";
+      els.tweakProcess.textContent = originalText;
+      els.tweakProcess.onclick = processWithSettings;
+      doProcess(speedMult, flowMult, bedLevel);
+    };
+    return;
+  }
+
+  doProcess(speedMult, flowMult, bedLevel);
+}
+
+async function doProcess(speedMult, flowMult, bedLevel) {
+  hideAllCards();
+  setBusy(true);
+  const started = performance.now();
+
+  try {
+    setStatus("Processing with adjusted settings…", "loading");
+    await nextPaint();
+
+    const cfg = buildConfig();
+    cfg.speed_multiplier = speedMult;
+    cfg.flow_multiplier = flowMult;
+    cfg.bed_leveling = bedLevel;
+
+    const raw = pyodide.globals.get("run_merge")(JSON.stringify(cfg));
+    const result = JSON.parse(raw);
+
+    const workMs = performance.now() - started;
+    if (workMs < MIN_BUSY_MS) await sleep(MIN_BUSY_MS - workMs);
+
+    if (!result.ok) {
+      setBusy(false);
+      setStatus("Merge failed.", "error");
+      showBanner(result.error, "err");
+      if (result.traceback) logLine(result.traceback, "err");
+      return;
+    }
+
+    lastResult = result;
+    setBusy(false);
+    setStatus("Merge complete.", "ready");
+    flashDone();
+
+    els.results.classList.remove("hidden");
+    showEstimates(result);
+
+    if (result.warnings && result.warnings.length) {
+      for (const w of result.warnings) {
+        showBanner(w, "warn");
+      }
+    }
+
+    armDownloads(result);
+  } catch (err) {
+    setBusy(false);
+    setStatus("Merge failed.", "error");
+    showBanner("Merge error: " + err.message, "err");
+  }
+}
+
+/*
+ * Hand ONE file to the browser.
+ *
+ * One click must produce exactly one download. Chrome treats a second download
+ * from the same gesture as a "multiple files" request, prompts for it, and once
+ * that is denied it silently blocks every later download from this origin --
+ * which looks like a dead button rather than a blocked one. So the buttons are
+ * wired in exactly one place (armDownloads) and never with onclick as well.
+ */
+function downloadFile(path, name, mime) {
+  let data;
+  try {
+    data = pyodide.FS.readFile(path);
+  } catch (err) {
+    showBanner(`Could not read ${name} back from the merge: ${err}`, "err");
+    return false;
+  }
+  // Copy into a fresh ArrayBuffer: the FS view points into Pyodide's heap, and
+  // a later merge can move it out from under a Blob that still references it.
+  const blob = new Blob([data.slice()], { type: mime || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoke on the next tick; revoking synchronously can race the download in
+  // some browsers and produce a zero-byte file.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return true;
+}
+
+/*
+ * Point the two download buttons at this result, and only this result.
+ *
+ * Both merge paths (Process, and Analyze -> Tweak -> Process) call this. The
+ * click handlers themselves are registered once at load and read `lastResult`,
+ * so nothing accumulates across merges.
+ */
+function armDownloads(result) {
+  els.dlOutput.disabled = !(result && result.output_path);
+  const hasReport = !!(result && result.report_path);
+  els.dlReport.disabled = !hasReport;
+  els.dlReport.title = hasReport
+    ? `Download ${result.report_name}`
+    : "No report was produced for this merge";
+}
+
+// ---- file pickers ---------------------------------------------------------
+function wireDrop(kind, dropId, inputId, fileId, hintId, validate, onAccept) {
+  const drop = document.getElementById(dropId);
+  const input = document.getElementById(inputId);
+  const fileEl = document.getElementById(fileId);
+  const hintEl = document.getElementById(hintId);
+
+  function accept(file) {
+    if (!file) return;
+    const problem = validate(file.name);
+    if (problem) {
+      drop.classList.remove("filled");
+      fileEl.classList.add("hidden");
+      hintEl.classList.remove("hidden");
+      picked[kind] = null;
+      refreshProcessButton();
+      showBanner(problem, "err");
+      return;
+    }
+    picked[kind] = file;
+    fileEl.textContent = file.name + "  (" + (file.size / 1024).toFixed(0) + " KB)";
+    fileEl.classList.remove("hidden");
+    hintEl.classList.add("hidden");
+    drop.classList.add("filled");
+    refreshProcessButton();
+    if (onAccept) onAccept(file);
+  }
+
+  drop.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => accept(input.files[0]));
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("hover"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("hover"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("hover");
+    accept(e.dataTransfer.files[0]);
+  });
+}
+
+wireDrop("ref", "drop-ref", "input-ref", "file-ref", "hint-ref", (name) => {
+  const n = name.toLowerCase();
+  if (n.endsWith(".3mf") || n.endsWith(".gcode")) return null;
+  return `"${name}" is neither a .gcode.3mf nor a .gcode. The reference must be a ` +
+         `sliced file — a .gcode.3mf from BambuStudio, or a .gcode from Cura / ` +
+         `PrusaSlicer / OrcaSlicer.`;
+}, inspectReference);
+
+wireDrop("custom", "drop-custom", "input-custom", "file-custom", "hint-custom", (name) => {
+  const n = name.toLowerCase();
+  if (n.endsWith(".3mf")) return `"${name}" is a .3mf. This slot needs the plain .gcode from Grasshopper.`;
+  return n.endsWith(".gcode") ? null : `"${name}" is not a .gcode file.`;
+});
+
+const BANNER_MARKS = { ok: "✓", warn: "!", err: "✕" };
+
+function showBanner(text, kind) {
+  els.results.classList.remove("hidden");
+  const div = document.createElement("div");
+  div.className = "banner " + kind;
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  mark.textContent = BANNER_MARKS[kind] || "";
+  const body = document.createElement("span");
+  body.textContent = text;
+  div.append(mark, body);
+  els.banners.appendChild(div);
+}
+
+// ---- estimate tiles -------------------------------------------------------
+const num = (v, d = 2) =>
+  Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+function addStat(key, value, unit, detail, primary) {
+  const tile = document.createElement("div");
+  tile.className = "stat" + (primary ? " primary" : "");
+  const k = document.createElement("div");
+  k.className = "k";
+  k.textContent = key;
+  const v = document.createElement("div");
+  v.className = "v";
+  v.textContent = value;
+  if (unit) {
+    const u = document.createElement("span");
+    u.className = "u";
+    u.textContent = unit;
+    v.appendChild(u);
+  }
+  tile.append(k, v);
+  if (detail) {
+    const d = document.createElement("div");
+    d.className = "d";
+    d.textContent = detail;
+    tile.appendChild(d);
+  }
+  els.stats.appendChild(tile);
+}
+
+// The two headline numbers are the print time and the material mass; the rest
+// of each tile explains where that number came from, since both are estimates.
+function showEstimates(result) {
+  const e = result.estimates;
+  if (!e || e.print_time_s === undefined) return;
+
+  addStat("Estimated print time", e.print_time_text, "",
+    `printing ${fmtSecs(e.printing_time_s)} · travel ${fmtSecs(e.travel_time_s)}` + (e.dwell_time_s ? ` · pausing ${fmtSecs(e.dwell_time_s)}` : ""),
+    true);
+  addStat("Estimated material", num(e.total_grams), "g",
+    `${num(e.filament_grams)} g geometry + ${num(e.priming_grams)} g priming line`,
+    true);
+  addStat("Filament", num(e.filament_length_mm / 1000), "m",
+    `${num(e.filament_volume_mm3 / 1000)} cm³ · ⌀${e.filament_diameter_mm} mm · ${e.filament_density_g_cm3} g/cm³`);
+  addStat("Moves", result.moves.toLocaleString(), "",
+    `${result.settings.speed_mm_s} mm/s base · flow ${result.settings.flow}`);
+
+  els.stats.classList.remove("hidden");
+  els.estnote.textContent =
+    "Estimates cover the geometry only: they ignore acceleration and exclude heat-up, " +
+    "bed leveling and teardown, so the real print takes somewhat longer. Filament " +
+    "diameter and density are read from the reference file.";
+  els.estnote.classList.remove("hidden");
+}
+
+// Same shape as the Python format_duration, for the tile sub-lines.
+function fmtSecs(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+function clearResults() {
+  els.banners.innerHTML = "";
+  els.stats.innerHTML = "";
+  els.stats.classList.add("hidden");
+  els.estnote.classList.add("hidden");
+  els.results.classList.add("hidden");
+  els.log.innerHTML = "";
+  els.logcard.classList.add("hidden");
+  lastResult = null;
+  armDownloads(null);
+}
+
+// ---- Pyodide boot ---------------------------------------------------------
+async function boot() {
+  try {
+    pyodide = await loadPyodide({ indexURL: PYODIDE_INDEX });
+    pyodide.setStdout({ batched: (s) => logLine(s) });
+    pyodide.setStderr({ batched: (s) => logLine(s, "err") });
+
+    // Install the merger as a real importable module so __file__ resolves and
+    // the source stays byte-identical to the CLI version.
+    pyodide.FS.mkdirTree("/lib");
+    pyodide.FS.writeFile("/lib/gcode_merger.py",
+      document.getElementById("py-merger").textContent);
+    pyodide.FS.writeFile("/lib/printer_profiles.py",
+      document.getElementById("py-profiles").textContent);
+    pyodide.runPython("import sys; sys.path.insert(0, '/lib')");
+    pyodide.runPython(document.getElementById("py-driver").textContent);
+
+    REGISTRY = JSON.parse(pyodide.globals.get("registry_json")());
+    populateRegistryUI();
+
+    pyReady = true;
+    setStatus("Ready.", "ready");
+    if (pendingInspect) inspectReference(pendingInspect);
+    refreshProcessButton();
+  } catch (err) {
+    setStatus("Failed to load the Python runtime: " + err.message, "error");
+    logLine(String(err), "err");
+  }
+}
+
+// Assemble the override dict handed to GCodeMerger(config=...).
+//
+// Fields whose value came from the reference file are deliberately NOT sent:
+// the merger reads those itself, and the report then records them as
+// file-declared rather than as an override. Anything the table supplied or you
+// typed IS sent, because the merger has no other way to know it.
+function buildConfig() {
+  const cfg = {};
+  if (picked.ref) cfg.reference_file = picked.ref.name;
+  if (picked.custom) cfg.custom_file = picked.custom.name;
+
+  if (fieldSource.bed && fieldSource.bed !== "file") {
+    const bx = parseFloat(els.bedx.value), by = parseFloat(els.bedy.value);
+    if (isFinite(bx) && isFinite(by)) { cfg.bed_x = bx; cfg.bed_y = by; }
+  }
+  if (fieldSource.height && fieldSource.height !== "file") {
+    const bz = parseFloat(els.bedz.value);
+    if (isFinite(bz)) cfg.printable_height = bz;
+  }
+  if (fieldSource.pause && fieldSource.pause !== "file" && els.pausecmd.value.trim()) {
+    cfg.pause_gcode = els.pausecmd.value.trim();
+  }
+  if (els.firmware.value) cfg.firmware = els.firmware.value;
+
+  // Legacy per-printer extras (e.g. end_park_z) still ride along if the
+  // presets block below defines an entry matching the chosen model.
+  const preset = PRINTERS[els.printer.value];
+  if (preset && preset.config) Object.assign(cfg, preset.config);
+  return cfg;
+}
+
+// ---- run ------------------------------------------------------------------
+async function process() {
+  clearResults();
+  setBusy(true);
+  const started = performance.now();
+
+  try {
+    setStatus("Reading input files…", "loading");
+    await nextPaint();
+
+    const projectDir = pyodide.globals.get("reset_project")();
+    for (const file of [picked.ref, picked.custom]) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      pyodide.FS.writeFile(projectDir + "/" + file.name, bytes);
+    }
+
+    setStatus("Merging geometry and recalculating extrusion…", "loading");
+    await nextPaint();  // get the spinner on screen before the main thread blocks
+
+    const raw = pyodide.globals.get("run_merge")(JSON.stringify(buildConfig()));
+    const result = JSON.parse(raw);
+
+    // Real work time, measured before any artificial padding is added, so the
+    // duration reported to the user is the honest one.
+    const workMs = performance.now() - started;
+    if (workMs < MIN_BUSY_MS) await sleep(MIN_BUSY_MS - workMs);
+
+    if (!result.ok) {
+      setStatus("Merge failed.", "error");
+      showBanner(result.error, "err");
+      logLine(result.traceback, "err");
+      return;
+    }
+
+    lastResult = result;
+    const secs = (workMs / 1000).toFixed(1);
+    const est = result.estimates || {};
+    setStatus(
+      est.print_time_text
+        ? `Done in ${secs}s — estimated print ${est.print_time_text}, ${num(est.total_grams)} g.`
+        : `Done in ${secs}s.`,
+      "ready"
+    );
+    flashDone();
+    els.results.classList.remove("hidden");
+    showEstimates(result);
+    armDownloads(result);
+    showBanner(`Merged in ${secs}s. Output: ${result.output_name}`, "ok");
+    for (const w of result.warnings || []) showBanner("Warning: " + w, "warn");
+  } catch (err) {
+    setStatus("Merge failed.", "error");
+    showBanner(String(err), "err");
+    logLine(String(err && err.stack ? err.stack : err), "err");
+  } finally {
+    setBusy(false);
+  }
+}
+
+els.analyze.addEventListener("click", analyze);
+els.tweakButton.addEventListener("click", showTweakCard);
+els.analyzeProcess.addEventListener("click", processWithSettings);
+els.speedMult.addEventListener("input", updateTweakPreview);
+els.flowMult.addEventListener("input", updateTweakPreview);
+els.bedLevelingToggle.addEventListener("change", updateTweakPreview);
+els.tweakSettings.addEventListener("click", () => {
+  hideAllCards();
+  els.printercard.classList.remove("hidden");
+});
+els.tweakBack.addEventListener("click", backFromTweak);
+els.tweakProcess.addEventListener("click", processWithSettings);
+// The ONLY handlers on these two buttons. One click, one file.
+els.dlOutput.addEventListener("click", () => {
+  if (!lastResult || !lastResult.output_path) return;
+  downloadFile(lastResult.output_path, lastResult.output_name);
+});
+els.dlReport.addEventListener("click", () => {
+  if (!lastResult) return;
+  if (!lastResult.report_path) {
+    showBanner("This merge produced no report file.", "warn");
+    return;
+  }
+  downloadFile(lastResult.report_path, lastResult.report_name, "text/plain");
+});
+els.reset.addEventListener("click", () => {
+  if (busy) return;
+  clearTimeout(doneFlashTimer);
+  els.analyze.classList.remove("done");
+  els.analyzeLabel.textContent = "Analyze";
+  setStatus("Ready.", "ready");
+  hideAllCards();
+  clearResults();
+  analysisResult = null;
+  for (const kind of ["ref", "custom"]) picked[kind] = null;
+  for (const id of ["file-ref", "file-custom"]) document.getElementById(id).classList.add("hidden");
+  for (const id of ["hint-ref", "hint-custom"]) document.getElementById(id).classList.remove("hidden");
+  for (const id of ["drop-ref", "drop-custom"]) document.getElementById(id).classList.remove("filled");
+  document.getElementById("input-ref").value = "";
+  document.getElementById("input-custom").value = "";
+  els.printercard.classList.add("hidden");
+  refInfo = null;
+  pendingInspect = null;
+  refreshProcessButton();
+});
+
+boot();
+</script>
+</body>
+</html>
