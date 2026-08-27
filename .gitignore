@@ -9,6 +9,9 @@ package-lock.json
 # what to put here.
 testdata/
 
+# Grasshopper python code for the various components
+python_scripts/
+
 # --- Python -----------------------------------------------------------------
 __pycache__/
 *.pyc
