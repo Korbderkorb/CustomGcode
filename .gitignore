@@ -12,6 +12,9 @@ testdata/
 # Grasshopper python code for the various components
 python_scripts/
 
+#WIP
+grasshopper_WIP/
+
 # --- Python -----------------------------------------------------------------
 __pycache__/
 *.pyc
